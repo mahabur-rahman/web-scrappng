@@ -13,18 +13,44 @@ type QuoteItem = {
 export class ScraperService {
   private readonly outputDir = path.join(process.cwd(), 'data');
   private readonly outputFile = path.join(this.outputDir, 'data.json');
+  private readonly startUrl = 'https://quotes.toscrape.com/js/';
 
   async getQuotes(): Promise<{ title: string; quotes: QuoteItem[] }> {
     const browser = await puppeteer.launch({ headless: true });
     try {
       const page = await browser.newPage();
 
-      await page.goto('https://quotes.toscrape.com/js/', {
-        waitUntil: 'networkidle2',
-      });
+      const { title, quotes } = await this.scrapeAllPages(page, this.startUrl);
 
-      const title = await page.title();
-      const quotes = await page.$$eval('.quote', (quoteElements) =>
+      const mergedQuotes = await this.saveQuotes({ title, quotes });
+      return { title, quotes: mergedQuotes };
+    } finally {
+      await browser.close();
+    }
+  }
+
+  private async scrapeAllPages(
+    page: puppeteer.Page,
+    startUrl: string,
+  ): Promise<{ title: string; quotes: QuoteItem[] }> {
+    const visited = new Set<string>();
+    let currentUrl = startUrl;
+    let title = '';
+    let allQuotes: QuoteItem[] = [];
+
+    for (;;) {
+      if (visited.has(currentUrl)) {
+        break;
+      }
+      visited.add(currentUrl);
+
+      await page.goto(currentUrl, { waitUntil: 'networkidle2' });
+
+      if (!title) {
+        title = await page.title();
+      }
+
+      const pageQuotes = await page.$$eval('.quote', (quoteElements) =>
         quoteElements
           .map((quoteEl) => {
             const text =
@@ -39,12 +65,25 @@ export class ScraperService {
           })
           .filter((item) => item.text.length > 0),
       );
+      allQuotes = this.mergeUniqueQuotes(allQuotes, pageQuotes);
 
-      const mergedQuotes = await this.saveQuotes({ title, quotes });
-      return { title, quotes: mergedQuotes };
-    } finally {
-      await browser.close();
+      const nextHref = await page.$eval(
+        'ul.pager li.next a',
+        (el) => el.getAttribute('href') ?? '',
+      ).catch(() => '');
+
+      if (!nextHref) {
+        break;
+      }
+
+      const nextUrl = new URL(nextHref, currentUrl).toString();
+      if (nextUrl === currentUrl) {
+        break;
+      }
+      currentUrl = nextUrl;
     }
+
+    return { title: title || 'Quotes', quotes: allQuotes };
   }
 
   private async saveQuotes(payload: {
