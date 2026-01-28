@@ -3,12 +3,17 @@ import { promises as fs } from 'fs';
 import * as path from 'path';
 import * as puppeteer from 'puppeteer';
 
+type QuoteItem = {
+  text: string;
+  author: string;
+};
+
 @Injectable()
 export class ScraperService {
   private readonly outputDir = path.join(process.cwd(), 'data');
   private readonly outputFile = path.join(this.outputDir, 'data.json');
 
-  async getQuotes(): Promise<{ title: string; quotes: string[] }> {
+  async getQuotes(): Promise<{ title: string; quotes: QuoteItem[] }> {
     const browser = await puppeteer.launch({ headless: true });
     try {
       const page = await browser.newPage();
@@ -18,8 +23,16 @@ export class ScraperService {
       });
 
       const title = await page.title();
-      const quotes = await page.$$eval('.quote span.text', elements =>
-        elements.map(el => (el.textContent || '').trim()).filter(Boolean),
+      const quotes = await page.$$eval('.quote', quoteElements =>
+        quoteElements
+          .map(quoteEl => {
+            const text =
+              quoteEl.querySelector('span.text')?.textContent?.trim() ?? '';
+            const author =
+              quoteEl.querySelector('small.author')?.textContent?.trim() ?? '';
+            return { text, author };
+          })
+          .filter(item => item.text.length > 0),
       );
 
       const mergedQuotes = await this.saveQuotes({ title, quotes });
@@ -31,8 +44,8 @@ export class ScraperService {
 
   private async saveQuotes(payload: {
     title: string;
-    quotes: string[];
-  }): Promise<string[]> {
+    quotes: QuoteItem[];
+  }): Promise<QuoteItem[]> {
     await fs.mkdir(this.outputDir, { recursive: true });
     const existingQuotes = await this.readExistingQuotes();
     const mergedQuotes = this.mergeUniqueQuotes(existingQuotes, payload.quotes);
@@ -47,17 +60,11 @@ export class ScraperService {
     return mergedQuotes;
   }
 
-  private async readExistingQuotes(): Promise<string[]> {
+  private async readExistingQuotes(): Promise<QuoteItem[]> {
     try {
       const raw = await fs.readFile(this.outputFile, 'utf-8');
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        return parsed.filter(item => typeof item === 'string');
-      }
-      if (parsed && Array.isArray(parsed.quotes)) {
-        return parsed.quotes.filter((item: unknown) => typeof item === 'string');
-      }
-      return [];
+      return this.coerceQuoteItems(Array.isArray(parsed) ? parsed : parsed?.quotes);
     } catch (error) {
       const err = error as NodeJS.ErrnoException;
       if (err.code === 'ENOENT') {
@@ -67,17 +74,68 @@ export class ScraperService {
     }
   }
 
-  private mergeUniqueQuotes(existing: string[], incoming: string[]): string[] {
-    const seen = new Set<string>();
-    const result: string[] = [];
-    for (const quote of [...existing, ...incoming]) {
-      const normalized = quote.trim();
-      if (!normalized || seen.has(normalized)) {
+  private coerceQuoteItems(value: unknown): QuoteItem[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    const result: QuoteItem[] = [];
+    for (const item of value) {
+      if (typeof item === 'string') {
+        const text = item.trim();
+        if (!text) {
+          continue;
+        }
+        result.push({ text, author: '' });
         continue;
       }
-      seen.add(normalized);
-      result.push(normalized);
+      if (item && typeof item === 'object') {
+        const maybeText = (item as { text?: unknown }).text;
+        const maybeAuthor = (item as { author?: unknown }).author;
+        const text = typeof maybeText === 'string' ? maybeText.trim() : '';
+        const author = typeof maybeAuthor === 'string' ? maybeAuthor.trim() : '';
+        if (!text) {
+          continue;
+        }
+        result.push({ text, author });
+      }
     }
     return result;
+  }
+
+  private mergeUniqueQuotes(
+    existing: QuoteItem[],
+    incoming: QuoteItem[],
+  ): QuoteItem[] {
+    const order: string[] = [];
+    const byText = new Map<string, QuoteItem>();
+
+    const upsert = (quote: QuoteItem) => {
+      const text = quote.text.trim();
+      if (!text) {
+        return;
+      }
+      const author = quote.author.trim();
+
+      const existingItem = byText.get(text);
+      if (!existingItem) {
+        byText.set(text, { text, author });
+        order.push(text);
+        return;
+      }
+
+      if (!existingItem.author && author) {
+        byText.set(text, { text, author });
+      }
+    };
+
+    for (const quote of existing) {
+      upsert(quote);
+    }
+    for (const quote of incoming) {
+      upsert(quote);
+    }
+
+    return order.map(text => byText.get(text)!).filter(Boolean);
   }
 }
