@@ -6,6 +6,7 @@ import * as puppeteer from 'puppeteer';
 type QuoteItem = {
   text: string;
   author: string;
+  tags: string[];
 };
 
 @Injectable()
@@ -23,16 +24,20 @@ export class ScraperService {
       });
 
       const title = await page.title();
-      const quotes = await page.$$eval('.quote', quoteElements =>
+      const quotes = await page.$$eval('.quote', (quoteElements) =>
         quoteElements
-          .map(quoteEl => {
+          .map((quoteEl) => {
             const text =
               quoteEl.querySelector('span.text')?.textContent?.trim() ?? '';
             const author =
               quoteEl.querySelector('small.author')?.textContent?.trim() ?? '';
-            return { text, author };
+            const tags = Array.from(
+              quoteEl.querySelectorAll('.tags a.tag'),
+              (tagEl) => tagEl.textContent?.trim() ?? '',
+            ).filter(Boolean);
+            return { text, author, tags };
           })
-          .filter(item => item.text.length > 0),
+          .filter((item) => item.text.length > 0),
       );
 
       const mergedQuotes = await this.saveQuotes({ title, quotes });
@@ -56,7 +61,11 @@ export class ScraperService {
       count: mergedQuotes.length,
       quotes: mergedQuotes,
     };
-    await fs.writeFile(this.outputFile, JSON.stringify(output, null, 2), 'utf-8');
+    await fs.writeFile(
+      this.outputFile,
+      JSON.stringify(output, null, 2),
+      'utf-8',
+    );
     return mergedQuotes;
   }
 
@@ -64,7 +73,9 @@ export class ScraperService {
     try {
       const raw = await fs.readFile(this.outputFile, 'utf-8');
       const parsed = JSON.parse(raw);
-      return this.coerceQuoteItems(Array.isArray(parsed) ? parsed : parsed?.quotes);
+      return this.coerceQuoteItems(
+        Array.isArray(parsed) ? parsed : parsed?.quotes,
+      );
     } catch (error) {
       const err = error as NodeJS.ErrnoException;
       if (err.code === 'ENOENT') {
@@ -86,18 +97,26 @@ export class ScraperService {
         if (!text) {
           continue;
         }
-        result.push({ text, author: '' });
+        result.push({ text, author: '', tags: [] });
         continue;
       }
       if (item && typeof item === 'object') {
         const maybeText = (item as { text?: unknown }).text;
         const maybeAuthor = (item as { author?: unknown }).author;
+        const maybeTags = (item as { tags?: unknown }).tags;
         const text = typeof maybeText === 'string' ? maybeText.trim() : '';
-        const author = typeof maybeAuthor === 'string' ? maybeAuthor.trim() : '';
+        const author =
+          typeof maybeAuthor === 'string' ? maybeAuthor.trim() : '';
+        const tags = Array.isArray(maybeTags)
+          ? maybeTags
+              .filter((tag: unknown) => typeof tag === 'string')
+              .map((tag) => tag.trim())
+              .filter(Boolean)
+          : [];
         if (!text) {
           continue;
         }
-        result.push({ text, author });
+        result.push({ text, author, tags });
       }
     }
     return result;
@@ -116,17 +135,25 @@ export class ScraperService {
         return;
       }
       const author = quote.author.trim();
+      const tags = Array.isArray(quote.tags)
+        ? quote.tags.map((tag) => tag.trim()).filter(Boolean)
+        : [];
 
       const existingItem = byText.get(text);
       if (!existingItem) {
-        byText.set(text, { text, author });
+        byText.set(text, { text, author, tags });
         order.push(text);
         return;
       }
 
-      if (!existingItem.author && author) {
-        byText.set(text, { text, author });
+      const nextAuthor = existingItem.author || author;
+      const tagSet = new Set<string>(
+        Array.isArray(existingItem.tags) ? existingItem.tags : [],
+      );
+      for (const tag of tags) {
+        tagSet.add(tag);
       }
+      byText.set(text, { text, author: nextAuthor, tags: Array.from(tagSet) });
     };
 
     for (const quote of existing) {
@@ -136,6 +163,6 @@ export class ScraperService {
       upsert(quote);
     }
 
-    return order.map(text => byText.get(text)!).filter(Boolean);
+    return order.map((text) => byText.get(text)!).filter(Boolean);
   }
 }
